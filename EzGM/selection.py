@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 import requests
 from selenium import webdriver
 from .webdriverdownloader import ChromeDriverDownloader, GeckoDriverDownloader
-from numba import njit
+#from numba import njit
 from openquake.hazardlib import gsim, imt, const
 from .utility import create_dir, ContentFromZip, ReadNGA, ReadESM
 from .utility import SiteParam_tbec2018, Sae_tbec2018, SiteParam_asce7_16, Sae_asce7_16, Sae_ec8_part1
@@ -1642,6 +1642,417 @@ class conditional_spectrum(_subclass_):
 
         recUse = np.argmin(np.abs(devTotalSim))  # find the simulated spectra that best match the targets
         self.sim_spec = np.log(specDict[recUse])  # return the best set of simulations
+        
+    
+    def _sample_trials(self,nTrials):
+        """ 
+        Details
+        -------
+        Generates multiple simulated response spectra with best matches to the target values.
+        
+        """
+        # Set initial seed for simulation
+        if self.seedValue != 0:
+            np.random.seed(0)
+        else:
+            np.random.seed(sum(gmtime()[:6]))
+
+        devTotalSim = np.zeros((self.nTrials, 1))
+        specDict = {}
+        nT = len(self.T)
+        # Generate simulated response spectra with best matches to the target values
+        for j in range(nTrials):
+            specDict[j] = np.zeros((self.nGM, nT))
+            for i in range(self.nGM):
+                # Note: we may use latin hypercube sampling here instead. I leave it as Monte Carlo for now
+                specDict[j][i, :] = np.random.multivariate_normal(self.mu_ln, self.cov)
+                
+        return specDict
+    
+    
+    def _simulate_spectra_ind(self,nTrials):
+        """
+        Details
+        -------
+        Generates simulated response spectra with best matches to the target values.
+
+        Parameters
+        ----------
+        None.
+        
+        Returns
+        -------
+        None.
+        """
+
+        # Set initial seed for simulation
+        if self.seedValue != 0:
+            np.random.seed(0)
+        else:
+            np.random.seed(sum(gmtime()[:6]))
+
+        devTotalSim = np.zeros((self.nTrials, 1))
+        specDict = {}
+        nT = len(self.T)
+        # Generate simulated response spectra with best matches to the target values
+        for j in range(nTrials):
+            specDict[j] = np.zeros((self.nGM, nT))
+            for i in range(self.nGM):
+                # Note: we may use latin hypercube sampling here instead. I leave it as Monte Carlo for now
+                specDict[j][i, :] = np.exp(np.random.multivariate_normal(self.mu_ln, self.cov))
+
+            devMeanSim = np.mean(np.log(specDict[j]),
+                                 axis=0) - self.mu_ln  # how close is the mean of the spectra to the target
+            devSigSim = np.std(np.log(specDict[j]),
+                               axis=0) - self.sigma_ln  # how close is the mean of the spectra to the target
+            devSkewSim = skew(np.log(specDict[j]),
+                              axis=0)  # how close is the skewness of the spectra to zero (i.e., the target)
+
+            # devTotalSim[j] = self.weights[0] * np.sum(devMeanSim ** 2) + \
+            #                  self.weights[1] * np.sum(devSigSim ** 2) + \
+            #                  0.1 * (self.weights[2]) * np.sum(
+            #     devSkewSim ** 2)  # combine the three error metrics to compute a total error
+
+        # recUse = np.argmin(np.abs(devTotalSim))  # find the simulated spectra that best match the targets
+        # self.sim_spec = np.log(specDict[recUse])  # return the best set of simulations
+        sim_spec = np.log(specDict[0])
+        
+        return np.sum(devMeanSim**2),np.sum(devSigSim**2),np.sum(devSkewSim**2)
+        
+ 
+    def error_obj(self, sample,nGM=7, isScaled=1):
+        """
+        Details
+        given a sample calculates the error median and standard deviation
+        -------
+        Perform the ground motion selection.
+        
+        References
+        ----------
+        Jayaram, N., Lin, T., and Baker, J. W. (2011). 
+        A computationally efficient ground-motion selection algorithm for 
+        matching a target response spectrum mean and variance.
+        Earthquake Spectra, 27(3), 797-815.
+        
+        Parameters
+        ----------
+        nGM : int, optional, the default is 30.
+            Number of ground motions to be selected.
+        isScaled : int, optional, the default is 1.
+            0 not to allow use of amplitude scaling for spectral matching.
+            1 to allow use of amplitude scaling for spectral matching.
+        maxScale : float, optional, the default is 4.
+            The maximum allowable scale factor
+        Mw_lim : list, optional, the default is None.
+            The limiting values on magnitude. 
+        Vs30_lim : list, optional, the default is None.
+            The limiting values on Vs30. 
+        Rjb_lim : list, optional, the default is None.
+            The limiting values on Rjb. 
+        fault_lim : list, optional, the default is None.
+            The limiting fault mechanisms.
+            For NGA_W2 database:
+                0 for unspecified fault
+                1 for strike-slip fault
+                2 for normal fault
+                3 for reverse fault
+            For ESM_2018 database:
+                'NF' for normal faulting
+                'NS' for predominately normal with strike-slip component
+                'O' for oblique
+                'SS' for strike-slip faulting
+                'TF' for thrust faulting
+                'TS' for predominately thrust with strike-slip component
+                'U' for unknown
+        seedValue  : int, optional, the default is 0.
+            For repeatability. For a particular seedValue not equal to
+            zero, the code will output the same set of ground motions.
+            The set will change when the seedValue changes. If set to
+            zero, the code randomizes the algorithm and different sets of
+            ground motions (satisfying the target mean and variance) are
+            generated each time.
+        weights : numpy.array or list, optional, the default is [1,2,0.3].
+            Weights for error in mean, standard deviation and skewness
+        nTrials : int, optional, the default is 20.
+            nTrials sets of response spectra are simulated and the best set (in terms of
+            matching means, variances and skewness is chosen as the seed). The user
+            can also optionally rerun this segment multiple times before deciding to
+            proceed with the rest of the algorithm. It is to be noted, however, that
+            the greedy improvement technique significantly improves the match between
+            the means and the variances subsequently.
+        nLoop   : int, optional, the default is 2.
+            Number of loops of optimization to perform.
+        penalty : int, optional, the default is 0.
+            > 0 to penalize selected spectra more than 
+            3 sigma from the target at any period, = 0 otherwise.
+        tol     : int, optional, the default is 10.
+            Tolerable percent error to skip optimization 
+
+        Returns
+        -------
+        None.
+        """
+
+        # Add selection settings to self
+        self.nGM = nGM
+        self.isScaled = isScaled
+
+        # Simulate response spectra
+        #print("the first")
+        # sample={}
+        # self._simulate_spectra()
+        # sample[0] = self.sim_spec
+
+        # Search the database and filter
+        #print("before")
+        sampleBig, Vs30, Mw, Rjb, fault, Filename_1, Filename_2, NGA_num, eq_ID, station_code = self._search_database()
+        # Processing available spectra
+        sampleBig = np.log(sampleBig)
+        nBig = sampleBig.shape[0]
+            
+        # Find best matches to the simulated spectra from ground-motion database
+        recID = np.ones(self.nGM, dtype=int) * (-1)
+        finalScaleFac = np.ones(self.nGM)
+        sampleSmall = np.ones((self.nGM, sampleBig.shape[1]))
+    
+        if self.cond == 1 and self.isScaled == 1:
+            # Calculate IMLs for the sample
+            f = interpolate.interp1d(self.T, np.exp(sampleBig), axis=1)
+            sampleBig_imls = np.exp(np.sum(np.log(f(self.Tstar)), axis=1) / len(self.Tstar))
+    
+        if self.cond == 1 and len(self.Tstar) == 1:
+            # These indices are required in case IM = Sa(T) to break the loop
+            ind2 = (np.where(self.T != self.Tstar[0])[0][0]).tolist()
+    
+        # Find nGM ground motions, inital subset
+        for i in range(self.nGM):
+            err = np.zeros(nBig)
+            scaleFac = np.ones(nBig)
+    
+            # Calculate the scaling factor
+            if self.isScaled == 1:
+                # using conditioning IML
+                if self.cond == 1:
+                    scaleFac = self.im_Tstar / sampleBig_imls
+                # using error minimization
+                elif self.cond == 0:
+                    scaleFac = np.sum(np.exp(sampleBig) * np.exp(sample[i, :]), axis=1) / np.sum(
+                        np.exp(sampleBig) ** 2, axis=1)
+            else:
+                scaleFac = np.ones(nBig)
+    
+            mask = scaleFac > self.maxScale
+            idxs = np.where(~mask)[0]
+            err[mask] = 1000000
+            err[~mask] = np.sum((np.log(
+                np.exp(sampleBig[idxs, :]) * scaleFac[~mask].reshape(len(scaleFac[~mask]), 1)) -
+                                 sample[i, :]) ** 2, axis=1)
+    
+            recID[i] = int(np.argsort(err)[0])
+            if err.min() >= 1000000:
+                raise Warning('Possible problem with simulated spectrum. No good matches found')
+    
+            if self.isScaled == 1:
+                finalScaleFac[i] = scaleFac[recID[i]]
+    
+            # Save the selected spectra
+            sampleSmall[i, :] = np.log(np.exp(sampleBig[recID[i], :]) * finalScaleFac[i])
+            
+            
+        # Lets check if the selected ground motions are good enough, if the errors are sufficiently small stop!
+        if self.cond == 1 and len(self.Tstar) == 1:  # if conditioned on SaT, ignore error at T*
+            medianErr = np.max(
+                np.abs(np.exp(np.mean(sampleSmall[:, ind2], axis=0)) - np.exp(self.mu_ln[ind2])) / np.exp(
+                    self.mu_ln[ind2])) * 100
+            stdErr = np.max(
+                np.abs(np.std(sampleSmall[:, ind2], axis=0) - self.sigma_ln[ind2]) / self.sigma_ln[ind2]) * 100
+        else:
+            medianErr = np.max(
+                np.abs(np.exp(np.mean(sampleSmall, axis=0)) - np.exp(self.mu_ln)) / np.exp(self.mu_ln)) * 100
+            stdErr = np.max(np.abs(np.std(sampleSmall, axis=0) - self.sigma_ln) / self.sigma_ln) * 100
+            
+                
+        return medianErr,stdErr
+
+        
+    def select_modified(self, sample,nGM=7, isScaled=1, maxScale=4,
+               Mw_lim=None, Vs30_lim=None, Rjb_lim=None, fault_lim=None,
+               nTrials=20, weights=[1, 2, 0.3], seedValue=0, nLoop=2, penalty=0, tol=10):
+        """
+        Details
+        -------
+        Perform the ground motion selection.
+        
+        References
+        ----------
+        Jayaram, N., Lin, T., and Baker, J. W. (2011). 
+        A computationally efficient ground-motion selection algorithm for 
+        matching a target response spectrum mean and variance.
+        Earthquake Spectra, 27(3), 797-815.
+        
+        Parameters
+        ----------
+        nGM : int, optional, the default is 30.
+            Number of ground motions to be selected.
+        isScaled : int, optional, the default is 1.
+            0 not to allow use of amplitude scaling for spectral matching.
+            1 to allow use of amplitude scaling for spectral matching.
+        maxScale : float, optional, the default is 4.
+            The maximum allowable scale factor
+        Mw_lim : list, optional, the default is None.
+            The limiting values on magnitude. 
+        Vs30_lim : list, optional, the default is None.
+            The limiting values on Vs30. 
+        Rjb_lim : list, optional, the default is None.
+            The limiting values on Rjb. 
+        fault_lim : list, optional, the default is None.
+            The limiting fault mechanisms.
+            For NGA_W2 database:
+                0 for unspecified fault
+                1 for strike-slip fault
+                2 for normal fault
+                3 for reverse fault
+            For ESM_2018 database:
+                'NF' for normal faulting
+                'NS' for predominately normal with strike-slip component
+                'O' for oblique
+                'SS' for strike-slip faulting
+                'TF' for thrust faulting
+                'TS' for predominately thrust with strike-slip component
+                'U' for unknown
+        seedValue  : int, optional, the default is 0.
+            For repeatability. For a particular seedValue not equal to
+            zero, the code will output the same set of ground motions.
+            The set will change when the seedValue changes. If set to
+            zero, the code randomizes the algorithm and different sets of
+            ground motions (satisfying the target mean and variance) are
+            generated each time.
+        weights : numpy.array or list, optional, the default is [1,2,0.3].
+            Weights for error in mean, standard deviation and skewness
+        nTrials : int, optional, the default is 20.
+            nTrials sets of response spectra are simulated and the best set (in terms of
+            matching means, variances and skewness is chosen as the seed). The user
+            can also optionally rerun this segment multiple times before deciding to
+            proceed with the rest of the algorithm. It is to be noted, however, that
+            the greedy improvement technique significantly improves the match between
+            the means and the variances subsequently.
+        nLoop   : int, optional, the default is 2.
+            Number of loops of optimization to perform.
+        penalty : int, optional, the default is 0.
+            > 0 to penalize selected spectra more than 
+            3 sigma from the target at any period, = 0 otherwise.
+        tol     : int, optional, the default is 10.
+            Tolerable percent error to skip optimization 
+
+        Returns
+        -------
+        None.
+        """
+
+        # Add selection settings to self
+        self.nGM = nGM
+        self.isScaled = isScaled
+        self.Mw_lim = Mw_lim
+        self.Vs30_lim = Vs30_lim
+        self.Rjb_lim = Rjb_lim
+        self.fault_lim = fault_lim
+        self.seedValue = seedValue
+        self.weights = weights
+        self.nTrials = nTrials
+        self.maxScale = maxScale
+        self.nLoop = nLoop
+        self.tol = tol
+        self.penalty = penalty
+
+        # Simulate response spectra
+        #print("the first")
+        # sample={}
+        # self._simulate_spectra()
+        # sample[0] = self.sim_spec
+
+        # Search the database and filter
+        #print("before")
+        sampleBig, Vs30, Mw, Rjb, fault, Filename_1, Filename_2, NGA_num, eq_ID, station_code = self._search_database()
+        # Processing available spectra
+        sampleBig = np.log(sampleBig)
+        nBig = sampleBig.shape[0]
+        sample_small_total = {}
+        for key in sample:
+            
+            # Find best matches to the simulated spectra from ground-motion database
+            recID = np.ones(self.nGM, dtype=int) * (-1)
+            finalScaleFac = np.ones(self.nGM)
+            sampleSmall = np.ones((self.nGM, sampleBig.shape[1]))
+            weights = np.array(weights)
+        
+            if self.cond == 1 and self.isScaled == 1:
+                # Calculate IMLs for the sample
+                f = interpolate.interp1d(self.T, np.exp(sampleBig), axis=1)
+                sampleBig_imls = np.exp(np.sum(np.log(f(self.Tstar)), axis=1) / len(self.Tstar))
+        
+            if self.cond == 1 and len(self.Tstar) == 1:
+                # These indices are required in case IM = Sa(T) to break the loop
+                ind2 = (np.where(self.T != self.Tstar[0])[0][0]).tolist()
+        
+            # Find nGM ground motions, inital subset
+            for i in range(self.nGM):
+                err = np.zeros(nBig)
+                scaleFac = np.ones(nBig)
+        
+                # Calculate the scaling factor
+                if self.isScaled == 1:
+                    # using conditioning IML
+                    if self.cond == 1:
+                        scaleFac = self.im_Tstar / sampleBig_imls
+                    # using error minimization
+                    elif self.cond == 0:
+                        scaleFac = np.sum(np.exp(sampleBig) * np.exp(sample[key][i, :]), axis=1) / np.sum(
+                            np.exp(sampleBig) ** 2, axis=1)
+                else:
+                    scaleFac = np.ones(nBig)
+        
+                mask = scaleFac > self.maxScale
+                idxs = np.where(~mask)[0]
+                err[mask] = 1000000
+                err[~mask] = np.sum((np.log(
+                    np.exp(sampleBig[idxs, :]) * scaleFac[~mask].reshape(len(scaleFac[~mask]), 1)) -
+                                     sample[key][i, :]) ** 2, axis=1)
+        
+                recID[i] = int(np.argsort(err)[0])
+                if err.min() >= 1000000:
+                    raise Warning('Possible problem with simulated spectrum. No good matches found')
+        
+                if self.isScaled == 1:
+                    finalScaleFac[i] = scaleFac[recID[i]]
+        
+                # Save the selected spectra
+                sampleSmall[i, :] = np.log(np.exp(sampleBig[recID[i], :]) * finalScaleFac[i])
+                sample_small_total[key] = sampleSmall
+                
+                
+            # Lets check if the selected ground motions are good enough, if the errors are sufficiently small stop!
+            if self.cond == 1 and len(self.Tstar) == 1:  # if conditioned on SaT, ignore error at T*
+                medianErr = np.max(
+                    np.abs(np.exp(np.mean(sampleSmall[:, ind2], axis=0)) - np.exp(self.mu_ln[ind2])) / np.exp(
+                        self.mu_ln[ind2])) * 100
+                stdErr = np.max(
+                    np.abs(np.std(sampleSmall[:, ind2], axis=0) - self.sigma_ln[ind2]) / self.sigma_ln[ind2]) * 100
+            else:
+                medianErr = np.max(
+                    np.abs(np.exp(np.mean(sampleSmall, axis=0)) - np.exp(self.mu_ln)) / np.exp(self.mu_ln)) * 100
+                stdErr = np.max(np.abs(np.std(sampleSmall, axis=0) - self.sigma_ln) / self.sigma_ln) * 100
+                
+            self.tol = 1
+            if medianErr < self.tol and stdErr < self.tol:
+                print("#################################################")
+                print(f'The errors are within the target {self.tol:d} percent %')
+                print('Ground motion selection is finished.')
+                print(f'For T ∈ [{self.T[0]:.2f} - {self.T[-1]:.2f}]')
+                print(f'Max error in median = {medianErr:.2f} %')
+                print(f'Max error in standard deviation = {stdErr:.2f} %')
+                print("#################################################")
+                
+        return sample_small_total
 
     def select(self, nGM=30, isScaled=1, maxScale=4,
                Mw_lim=None, Vs30_lim=None, Rjb_lim=None, fault_lim=None,
@@ -1733,10 +2144,13 @@ class conditional_spectrum(_subclass_):
         self.penalty = penalty
 
         # Simulate response spectra
+        #print("the first")
         self._simulate_spectra()
 
         # Search the database and filter
+        #print("before")
         sampleBig, Vs30, Mw, Rjb, fault, Filename_1, Filename_2, NGA_num, eq_ID, station_code = self._search_database()
+        
 
         # Processing available spectra
         sampleBig = np.log(sampleBig)
@@ -1790,12 +2204,31 @@ class conditional_spectrum(_subclass_):
 
             # Save the selected spectra
             sampleSmall[i, :] = np.log(np.exp(sampleBig[recID[i], :]) * finalScaleFac[i])
+            
+        # Lets check if the selected ground motions are good enough, if the errors are sufficiently small stop!
+        if self.cond == 1 and len(self.Tstar) == 1:  # if conditioned on SaT, ignore error at T*
+            medianErr = np.max(
+                np.abs(np.exp(np.mean(sampleSmall[:, ind2], axis=0)) - np.exp(self.mu_ln[ind2])) / np.exp(
+                    self.mu_ln[ind2])) * 100
+            stdErr = np.max(
+                np.abs(np.std(sampleSmall[:, ind2], axis=0) - self.sigma_ln[ind2]) / self.sigma_ln[ind2]) * 100
+        else:
+            medianErr = np.max(
+                np.abs(np.exp(np.mean(sampleSmall, axis=0)) - np.exp(self.mu_ln)) / np.exp(self.mu_ln)) * 100
+            stdErr = np.max(np.abs(np.std(sampleSmall, axis=0) - self.sigma_ln) / self.sigma_ln) * 100
+
+        
+        print('Ground motion selection is finished.')
+        print(f'For T ∈ [{self.T[0]:.2f} - {self.T[-1]:.2f}]')
+        print(f'Max error in median = {medianErr:.2f} %')
+        print(f'Max error in standard deviation = {stdErr:.2f} %')
 
         # Apply Greedy subset modification procedure
         # Use njit to speed up the optimization algorithm
-        @njit
+        #@njit
+        
         def find_rec(sampleSmall, scaleFac, mu_ln, sigma_ln, recIDs):
-
+            
             def mean_numba(a):
 
                 res = []
@@ -1845,7 +2278,7 @@ class conditional_spectrum(_subclass_):
             for i in range(self.nGM):  # Loop for nGM
                 sampleSmall = np.delete(sampleSmall, i, 0)
                 recID = np.delete(recID, i)
-
+                #print(i)
                 # Calculate the scaling factor
                 if self.isScaled == 1:
                     # using conditioning IML
@@ -1860,7 +2293,7 @@ class conditional_spectrum(_subclass_):
 
                 # Try to add a new spectra to the subset list
                 minID = find_rec(sampleSmall, scaleFac, self.mu_ln, self.sigma_ln, recID)
-
+                #print("hello")
                 # Add new element in the right slot
                 if self.isScaled == 1:
                     finalScaleFac[i] = scaleFac[minID]
@@ -2001,7 +2434,7 @@ class code_spectrum(_subclass_):
         self.RecPerEvent = RecPerEvent
 
     @staticmethod
-    @njit
+    #@njit
     def _opt2(sampleSmall, scaleFac, target_spec, recIDs, eqIDs, minID, nBig, eq_ID, sampleBig, RecPerEvent):
         # Optimize based on scaling factor
         def mean_numba(a):
