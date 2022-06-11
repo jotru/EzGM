@@ -2320,7 +2320,7 @@ class conditional_spectrum(_subclass_):
                                          Mw_lim=None, Vs30_lim=None, Rjb_lim=None, fault_lim=None,
                                          nTrials=20, weights=[1, 2, 0.3], seedValue=0, nLoop=2, penalty=0, tol=10):
         """generates initial population_paraollel tries to generate initial population in parallel
-        produces initial population that best fits the generated simulation
+        produces initial population that best fits the generated simulation and then runs greedy algorithm
         size of row => population size
         size of column => number of ground motion
         """
@@ -2340,24 +2340,20 @@ class conditional_spectrum(_subclass_):
         self.tol = tol
         self.penalty = penalty
 
+        recID =  self.select_greedy()
+        input = [nGM,isScaled,maxScale,Mw_lim,Vs30_lim,Rjb_lim, fault_lim,nTrials, weights, seedValue, nLoop, penalty, tol]
+
         # each population value
         pop_val = []
 
         sampleBig, Vs30, Mw, Rjb, fault, Filename_1, Filename_2, NGA_num, eq_ID, station_code = self._search_database()
         # Processing available spectra
         self.sampleBig = np.log(sampleBig)
-        tasks = []
-
-        # create input array
-
-        samples = []
-        for i in range(pop_size):
-            samples.append(self._simulate_spectra_ret(trials))
 
         with ProcessPoolExecutor(max_workers=30) as executor:
             i = 0
-            # f = [executor.submit(self._simulate_spectra_ret,trials) for i in range(pop_size)]
-            f = [executor.submit(self._return_record, sample) for sample in samples]
+            f = [executor.submit(self._select_greedy,input) for i in range(pop_size)]
+            #f = [executor.submit(self._return_record, sample) for sample in samples]
             # f = executor.submit(self._simulate_spectra_ret_par([trials for i in range(pop_size)]))
 
             for f in as_completed(f):
@@ -3664,9 +3660,7 @@ class conditional_spectrum(_subclass_):
         if self.database['Name'] == 'ESM_2018':
             self.rec_station_code = station_code[recID]
 
-    def select_greedy(self, nGM=30, isScaled=1, maxScale=4,
-               Mw_lim=None, Vs30_lim=None, Rjb_lim=None, fault_lim=None,
-               nTrials=20, weights=[1, 2, 0.3], seedValue=0, nLoop=2, penalty=0, tol=10):
+    def select_greedy(self, input):
         """
         Details
         -------
@@ -3753,6 +3747,8 @@ class conditional_spectrum(_subclass_):
                 res.append(a[:, i].std())
 
             return np.array(res)
+        #unpack the inputs
+        nGM , isScaled, maxScale ,Mw_lim , Vs30_lim , Rjb_lim , fault_lim ,nTrials , weights, seedValue , nLoop , penalty , tol = input
 
         # Add selection settings to self
         self.nGM = nGM
